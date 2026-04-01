@@ -7068,14 +7068,23 @@ static void emitLoadScalarOpsFromVGPRLoop(
   const AMDGPU::LaneMaskConstants &LMC = AMDGPU::LaneMaskConstants::get(ST);
   const auto *BoolXExecRC = TRI->getWaveMaskRegClass();
 
-  // Emit [v_cmpx_eq] and [s_andn2_wrexec] when these instructions are
-  // available.
-  // Otherwise, use the previous pattern of [v_cmp_eq], [s_and_saveexec],
-  // and [s_xor].
+  // Use [v_cmpx_eq] and [s_andn2_wrexec] only when the total index width
+  // across all ScalarOps is <= 64 bits. For wider indices, each 64-bit chunk
+  // would require a separate v_cmpx_eq that writes exec, which is worse than
+  // accumulating comparisons with AND and writing exec once per iteration.
+  // Fall back to: [v_cmp_eq], [s_and_saveexec], [s_xor].
   // TODO: Accurately detect the availability of [s_andn2_wrexec] instruction
   // in the target. For now, use the same condition as for the detection
   // [v_cmpx_eq].
-  bool UseNewExecInstructions = ST.hasNoSdstCMPX();
+  unsigned TotalNumSubRegs = 0;
+  for (MachineOperand *Op : ScalarOps) {
+    unsigned RegSize = TRI->getRegSizeInBits(Op->getReg(), MRI);
+    unsigned NumSubRegs = RegSize / 32;
+    assert(NumSubRegs >= 1 && "Unhandled register size");
+    TotalNumSubRegs += NumSubRegs;
+  }
+
+  bool UseNewExecInstructions = ST.hasNoSdstCMPX() && TotalNumSubRegs <= 2;
 
   MachineBasicBlock::iterator I = LoopBB.begin();
   Register CondReg;
@@ -7095,7 +7104,52 @@ static void emitLoadScalarOpsFromVGPRLoop(
         .addMBB(&BodyBB);
   }
 
-  for (MachineOperand *ScalarOp : ScalarOps) {
+  // Special case: two 32-bit ScalarOps (total 64 bits) on the new path.
+  // Instead of two v_cmpx_eq_u32 (each writing exec), emit one v_cmpx_eq_u64.
+  if (UseNewExecInstructions && ScalarOps.size() == 2) {
+    MachineOperand *ScalarOpLo = ScalarOps[0];
+    MachineOperand *ScalarOpHi = ScalarOps[1];
+    Register VLo = ScalarOpLo->getReg();
+    Register VHi = ScalarOpHi->getReg();
+
+    Register CurRegLo =
+        MRI.createVirtualRegister(&AMDGPU::SReg_32_XM0RegClass);
+    Register CurRegHi =
+        MRI.createVirtualRegister(&AMDGPU::SReg_32_XM0RegClass);
+
+    BuildMI(LoopBB, I, DL, TII.get(AMDGPU::V_READFIRSTLANE_B32), CurRegLo)
+        .addReg(VLo);
+    BuildMI(LoopBB, I, DL, TII.get(AMDGPU::V_READFIRSTLANE_B32), CurRegHi)
+        .addReg(VHi);
+
+    // Merge the two SGPRs into a 64-bit pair for the comparison.
+    Register CurReg = MRI.createVirtualRegister(&AMDGPU::SGPR_64RegClass);
+    BuildMI(LoopBB, I, DL, TII.get(AMDGPU::REG_SEQUENCE), CurReg)
+        .addReg(CurRegLo)
+        .addImm(AMDGPU::sub0)
+        .addReg(CurRegHi)
+        .addImm(AMDGPU::sub1);
+
+    // Merge the two VGPRs into a 64-bit pair for the comparison.
+    Register VPair =
+        MRI.createVirtualRegister(&AMDGPU::VReg_64RegClass);
+    BuildMI(LoopBB, I, DL, TII.get(AMDGPU::REG_SEQUENCE), VPair)
+        .addReg(VLo)
+        .addImm(AMDGPU::sub0)
+        .addReg(VHi)
+        .addImm(AMDGPU::sub1);
+
+    BuildMI(LoopBB, I, DL, TII.get(LMC.CmpXEqU64Opc))
+        .addReg(CurReg)
+        .addReg(VPair);
+
+    // Update both ScalarOp operands to use their respective SGPR pieces.
+    ScalarOpLo->setReg(CurRegLo);
+    ScalarOpLo->setIsKill();
+    ScalarOpHi->setReg(CurRegHi);
+    ScalarOpHi->setIsKill();
+  } else {
+    for (MachineOperand *ScalarOp : ScalarOps) {
     unsigned RegSize = TRI->getRegSizeInBits(ScalarOp->getReg(), MRI);
     unsigned NumSubRegs = RegSize / 32;
     Register VScalarOp = ScalarOp->getReg();
@@ -7214,6 +7268,7 @@ static void emitLoadScalarOpsFromVGPRLoop(
       ScalarOp->setIsKill();
     }
   }
+  } // end else (general loop)
 
   Register SaveExec;
   if (!UseNewExecInstructions) {
