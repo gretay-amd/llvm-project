@@ -63,7 +63,6 @@ define amdgpu_ps float @raw_buffer_load__vgpr_rsrc__vgpr_val__vgpr_voffset__sgpr
   ; CHECK-NEXT:   [[COPY5:%[0-9]+]]:sgpr(s32) = COPY $sgpr2
   ; CHECK-NEXT:   [[C:%[0-9]+]]:sgpr(s32) = G_CONSTANT i32 0
   ; CHECK-NEXT:   [[COPY6:%[0-9]+]]:vgpr(s32) = COPY [[C]](s32)
-  ; CHECK-NEXT:   [[DEF:%[0-9]+]]:sreg_64_xexec = IMPLICIT_DEF
   ; CHECK-NEXT:   [[S_MOV_B64_:%[0-9]+]]:sreg_64_xexec = S_MOV_B64 $exec
   ; CHECK-NEXT: {{  $}}
   ; CHECK-NEXT: bb.2:
@@ -118,7 +117,6 @@ define amdgpu_ps float @raw_buffer_load__sgpr_rsrc__vgpr_val__vgpr_voffset__vgpr
   ; CHECK-NEXT:   [[COPY5:%[0-9]+]]:vgpr(s32) = COPY $vgpr1
   ; CHECK-NEXT:   [[C:%[0-9]+]]:sgpr(s32) = G_CONSTANT i32 0
   ; CHECK-NEXT:   [[COPY6:%[0-9]+]]:vgpr(s32) = COPY [[C]](s32)
-  ; CHECK-NEXT:   [[DEF:%[0-9]+]]:sreg_64_xexec = IMPLICIT_DEF
   ; CHECK-NEXT:   [[S_MOV_B64_:%[0-9]+]]:sreg_64_xexec = S_MOV_B64 $exec
   ; CHECK-NEXT: {{  $}}
   ; CHECK-NEXT: bb.2:
@@ -164,7 +162,6 @@ define amdgpu_ps float @raw_buffer_load__vgpr_rsrc__vgpr_val__vgpr_voffset__vgpr
   ; CHECK-NEXT:   [[COPY5:%[0-9]+]]:vgpr(s32) = COPY $vgpr5
   ; CHECK-NEXT:   [[C:%[0-9]+]]:sgpr(s32) = G_CONSTANT i32 0
   ; CHECK-NEXT:   [[COPY6:%[0-9]+]]:vgpr(s32) = COPY [[C]](s32)
-  ; CHECK-NEXT:   [[DEF:%[0-9]+]]:sreg_64_xexec = IMPLICIT_DEF
   ; CHECK-NEXT:   [[S_MOV_B64_:%[0-9]+]]:sreg_64_xexec = S_MOV_B64 $exec
   ; CHECK-NEXT: {{  $}}
   ; CHECK-NEXT: bb.2:

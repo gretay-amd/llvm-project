@@ -110,7 +110,6 @@ define amdgpu_ps void @load_1d_vgpr_vaddr__vgpr_srsrc(<8 x i32> %rsrc, i32 %s) {
   ; FAST-NEXT:   [[BUILD_VECTOR:%[0-9]+]]:vgpr(<8 x s32>) = G_BUILD_VECTOR [[COPY]](s32), [[COPY1]](s32), [[COPY2]](s32), [[COPY3]](s32), [[COPY4]](s32), [[COPY5]](s32), [[COPY6]](s32), [[COPY7]](s32)
   ; FAST-NEXT:   [[COPY8:%[0-9]+]]:vgpr(s32) = COPY $vgpr8
   ; FAST-NEXT:   [[DEF:%[0-9]+]]:sgpr(p1) = G_IMPLICIT_DEF
-  ; FAST-NEXT:   [[DEF1:%[0-9]+]]:sreg_64_xexec = IMPLICIT_DEF
   ; FAST-NEXT:   [[S_MOV_B64_:%[0-9]+]]:sreg_64_xexec = S_MOV_B64 $exec
   ; FAST-NEXT: {{  $}}
   ; FAST-NEXT: bb.2:
@@ -170,7 +169,6 @@ define amdgpu_ps void @load_1d_vgpr_vaddr__vgpr_srsrc(<8 x i32> %rsrc, i32 %s) {
   ; GREEDY-NEXT:   [[BUILD_VECTOR:%[0-9]+]]:vgpr(<8 x s32>) = G_BUILD_VECTOR [[COPY]](s32), [[COPY1]](s32), [[COPY2]](s32), [[COPY3]](s32), [[COPY4]](s32), [[COPY5]](s32), [[COPY6]](s32), [[COPY7]](s32)
   ; GREEDY-NEXT:   [[COPY8:%[0-9]+]]:vgpr(s32) = COPY $vgpr8
   ; GREEDY-NEXT:   [[DEF:%[0-9]+]]:sgpr(p1) = G_IMPLICIT_DEF
-  ; GREEDY-NEXT:   [[DEF1:%[0-9]+]]:sreg_64_xexec = IMPLICIT_DEF
   ; GREEDY-NEXT:   [[S_MOV_B64_:%[0-9]+]]:sreg_64_xexec = S_MOV_B64 $exec
   ; GREEDY-NEXT: {{  $}}
   ; GREEDY-NEXT: bb.2:
@@ -237,7 +235,6 @@ define amdgpu_ps void @load_1d_sgpr_vaddr__vgpr_srsrc(<8 x i32> %rsrc, i32 inreg
   ; FAST-NEXT:   [[COPY8:%[0-9]+]]:sgpr(s32) = COPY $sgpr2
   ; FAST-NEXT:   [[DEF:%[0-9]+]]:sgpr(p1) = G_IMPLICIT_DEF
   ; FAST-NEXT:   [[COPY9:%[0-9]+]]:vgpr(s32) = COPY [[COPY8]](s32)
-  ; FAST-NEXT:   [[DEF1:%[0-9]+]]:sreg_64_xexec = IMPLICIT_DEF
   ; FAST-NEXT:   [[S_MOV_B64_:%[0-9]+]]:sreg_64_xexec = S_MOV_B64 $exec
   ; FAST-NEXT: {{  $}}
   ; FAST-NEXT: bb.2:
@@ -298,7 +295,6 @@ define amdgpu_ps void @load_1d_sgpr_vaddr__vgpr_srsrc(<8 x i32> %rsrc, i32 inreg
   ; GREEDY-NEXT:   [[COPY8:%[0-9]+]]:sgpr(s32) = COPY $sgpr2
   ; GREEDY-NEXT:   [[DEF:%[0-9]+]]:sgpr(p1) = G_IMPLICIT_DEF
   ; GREEDY-NEXT:   [[COPY9:%[0-9]+]]:vgpr(s32) = COPY [[COPY8]](s32)
-  ; GREEDY-NEXT:   [[DEF1:%[0-9]+]]:sreg_64_xexec = IMPLICIT_DEF
   ; GREEDY-NEXT:   [[S_MOV_B64_:%[0-9]+]]:sreg_64_xexec = S_MOV_B64 $exec
   ; GREEDY-NEXT: {{  $}}
   ; GREEDY-NEXT: bb.2:

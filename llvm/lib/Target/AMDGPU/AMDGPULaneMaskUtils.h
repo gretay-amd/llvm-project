@@ -44,7 +44,7 @@ public:
   const unsigned XorOpc;
   const unsigned XorTermOpc;
   const unsigned WQMOpc;
-
+  
   constexpr LaneMaskConstants(bool IsWave32)
       : ExecReg(IsWave32 ? AMDGPU::EXEC_LO : AMDGPU::EXEC),
         VccReg(IsWave32 ? AMDGPU::VCC_LO : AMDGPU::VCC),

@@ -103,12 +103,11 @@ bool RegBankLegalizeHelper::executeInWaterfallLoop(MachineIRBuilder &B,
 
   MachineRegisterInfo &MRI = *B.getMRI();
   Register SaveExecReg = MRI.createVirtualRegister(WaveRC);
-  Register InitSaveExecReg = MRI.createVirtualRegister(WaveRC);
+  const bool UseNewExecInstructions = ST.hasNoSdstCMPX();
 
-  // Don't bother using generic instructions/registers for the exec mask.
-  B.buildInstr(TargetOpcode::IMPLICIT_DEF).addDef(InitSaveExecReg);
-
-  Register SavedExec = MRI.createVirtualRegister(WaveRC);
+  Register SavedExec;
+  if (!UseNewExecInstructions)
+    SavedExec = MRI.createVirtualRegister(WaveRC);
 
   // To insert the loop we need to split the block. Move everything before
   // this point to a new block, and insert a new empty block before this
@@ -189,6 +188,18 @@ bool RegBankLegalizeHelper::executeInWaterfallLoop(MachineIRBuilder &B,
   auto NewEnd = BodyBB->end();
   assert(std::distance(NewBegin, NewEnd) == OrigRangeSize);
 
+  Register PhiExec, NewExec;
+  if (UseNewExecInstructions) {
+    PhiExec = MRI.createVirtualRegister(WaveRC);
+    NewExec = MRI.createVirtualRegister(WaveRC);
+    B.setInsertPt(*LoopBB, LoopBB->begin());
+    B.buildInstr(TargetOpcode::PHI, {PhiExec}, {})
+        .addReg(SaveExecReg)
+        .addMBB(&MBB)
+        .addReg(NewExec)
+        .addMBB(BodyBB);
+  }
+
   B.setMBB(*LoopBB);
   Register CondReg;
 
@@ -235,13 +246,22 @@ bool RegBankLegalizeHelper::executeInWaterfallLoop(MachineIRBuilder &B,
       }
 
       for (unsigned i = 0; i < NumParts; ++i) {
-        Register CmpReg = MRI.createVirtualRegister(VccRB_S1);
-        B.buildICmp(CmpInst::ICMP_EQ, CmpReg, CurrentLaneParts[i], OpParts[i]);
+        if (UseNewExecInstructions) {
+          unsigned CmpXOpc =
+              (PartSize == 32) ? LMC.CmpXEqU32Opc : LMC.CmpXEqU64Opc;
+          B.buildInstr(CmpXOpc)
+              .addReg(CurrentLaneParts[i])
+              .addReg(OpParts[i]);
+        } else {
+          Register CmpReg = MRI.createVirtualRegister(VccRB_S1);
+          B.buildICmp(CmpInst::ICMP_EQ, CmpReg, CurrentLaneParts[i],
+                      OpParts[i]);
 
-        if (!CondReg)
-          CondReg = CmpReg;
-        else
-          CondReg = B.buildAnd(VccRB_S1, CondReg, CmpReg).getReg(0);
+          if (!CondReg)
+            CondReg = CmpReg;
+          else
+            CondReg = B.buildAnd(VccRB_S1, CondReg, CmpReg).getReg(0);
+        }
       }
 
       Op.setReg(CurrentLaneReg);
@@ -251,24 +271,33 @@ bool RegBankLegalizeHelper::executeInWaterfallLoop(MachineIRBuilder &B,
     }
   }
 
-  // Copy vcc to sgpr32/64, ballot becomes a no-op during instruction selection.
-  Register CondRegLM =
-      MRI.createVirtualRegister({WaveRC, LLT::scalar(IsWave32 ? 32 : 64)});
-  B.buildIntrinsic(Intrinsic::amdgcn_ballot, CondRegLM).addReg(CondReg);
+  if (!UseNewExecInstructions) {
+    // Copy vcc to sgpr32/64, ballot becomes a no-op during instruction
+    // selection.
+    Register CondRegLM =
+        MRI.createVirtualRegister({WaveRC, LLT::scalar(IsWave32 ? 32 : 64)});
+    B.buildIntrinsic(Intrinsic::amdgcn_ballot, CondRegLM).addReg(CondReg);
 
-  // Update EXEC, save the original EXEC value to SavedExec.
-  B.buildInstr(LMC.AndSaveExecOpc)
-      .addDef(SavedExec)
-      .addReg(CondRegLM, RegState::Kill);
-  MRI.setSimpleHint(SavedExec, CondRegLM);
+    // Update EXEC, save the original EXEC value to SavedExec.
+    B.buildInstr(LMC.AndSaveExecOpc)
+        .addDef(SavedExec)
+        .addReg(CondRegLM, RegState::Kill);
+    MRI.setSimpleHint(SavedExec, CondRegLM);
+  }
 
   B.setInsertPt(*BodyBB, BodyBB->end());
 
-  // Update EXEC, switch all done bits to 0 and all todo bits to 1.
-  B.buildInstr(LMC.XorTermOpc)
-      .addDef(LMC.ExecReg)
-      .addReg(LMC.ExecReg)
-      .addReg(SavedExec);
+  if (UseNewExecInstructions) {
+    // Update EXEC to retain only the lanes that haven't been processed yet.
+    MRI.setSimpleHint(NewExec, PhiExec);
+    B.buildInstr(LMC.AndN2WRExecOpc, {NewExec}, {PhiExec});
+  } else {
+    // Update EXEC, switch all done bits to 0 and all todo bits to 1.
+    B.buildInstr(LMC.XorTermOpc)
+        .addDef(LMC.ExecReg)
+        .addReg(LMC.ExecReg)
+        .addReg(SavedExec);
+  }
 
   // XXX - s_xor_b64 sets scc to 1 if the result is nonzero, so can we use
   // s_cbranch_scc0?

@@ -29,7 +29,6 @@ define amdgpu_ps void @test_divergent_indirect_call_p0(ptr %fptr) {
   ; CHECK-NEXT:   [[COPY:%[0-9]+]]:vgpr(s32) = COPY $vgpr0
   ; CHECK-NEXT:   [[COPY1:%[0-9]+]]:vgpr(s32) = COPY $vgpr1
   ; CHECK-NEXT:   [[MV:%[0-9]+]]:vgpr(p0) = G_MERGE_VALUES [[COPY]](s32), [[COPY1]](s32)
-  ; CHECK-NEXT:   [[DEF:%[0-9]+]]:sreg_64_xexec = IMPLICIT_DEF
   ; CHECK-NEXT:   [[S_MOV_B64_:%[0-9]+]]:sreg_64_xexec = S_MOV_B64 $exec
   ; CHECK-NEXT: {{  $}}
   ; CHECK-NEXT: bb.2:
@@ -75,7 +74,6 @@ define amdgpu_ps i32 @test_divergent_indirect_call_p0_with_args(ptr %fptr, i32 %
   ; CHECK-NEXT:   [[COPY1:%[0-9]+]]:vgpr(s32) = COPY $vgpr1
   ; CHECK-NEXT:   [[MV:%[0-9]+]]:vgpr(p0) = G_MERGE_VALUES [[COPY]](s32), [[COPY1]](s32)
   ; CHECK-NEXT:   [[COPY2:%[0-9]+]]:vgpr(s32) = COPY $vgpr2
-  ; CHECK-NEXT:   [[DEF:%[0-9]+]]:sreg_64_xexec = IMPLICIT_DEF
   ; CHECK-NEXT:   [[S_MOV_B64_:%[0-9]+]]:sreg_64_xexec = S_MOV_B64 $exec
   ; CHECK-NEXT: {{  $}}
   ; CHECK-NEXT: bb.2:
