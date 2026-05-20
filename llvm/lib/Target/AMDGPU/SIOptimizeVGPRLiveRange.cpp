@@ -68,11 +68,22 @@
 ///  allocation knows that the value of %a does not need to be preserved through
 ///  iterations of the loop.
 ///
-//
+/// In addition to the live-range shortening described above, this pass can
+/// also optimize placement of v_cmpx instructions inside waterfall loop
+/// headers. By default, v_cmpx are deferred to the end of the header to
+/// hide latency of v_readfirstlane. To reduce register pressure,
+/// this pass can move v_cmpx instruction earlier and
+/// place it immediately before the last definition of its source operands.
+/// This transformation may shorten live ranges of operands of v_cmpx.
+/// Controlled by -amdgpu-waterfall-cmpx-placement-optimization.
+/// TODO: Ideally, this transformation would happen in the instruction scheduler,
+/// which already has register pressure estimate, but it would require
+/// the scheduler to operate across basic blocks and reason about EXEC mask.
 //===----------------------------------------------------------------------===//
 
 #include "SIOptimizeVGPRLiveRange.h"
 #include "AMDGPU.h"
+#include "GCNRegPressure.h"
 #include "GCNSubtarget.h"
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "SIMachineFunctionInfo.h"
@@ -82,10 +93,31 @@
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/InitializePasses.h"
+#include "llvm/Support/CommandLine.h"
 
 using namespace llvm;
 
 #define DEBUG_TYPE "si-opt-vgpr-liverange"
+
+enum class WaterfallCmpxPlacementMode {
+  Never,
+  Always,
+  EstimateRegisterPressure,
+};
+
+static cl::opt<WaterfallCmpxPlacementMode> WaterfallCmpxPlacementOptimization(
+    "amdgpu-waterfall-cmpx-placement-optimization",
+    cl::desc("Control v_cmpx placement in waterfall loop headers"),
+    cl::init(WaterfallCmpxPlacementMode::Never), cl::Hidden,
+    cl::values(
+        clEnumValN(WaterfallCmpxPlacementMode::Never, "never",
+                   "Keep cmpx deferred at end of header (default)"),
+        clEnumValN(WaterfallCmpxPlacementMode::Always, "always",
+                   "Always move cmpx earlier"),
+        clEnumValN(WaterfallCmpxPlacementMode::EstimateRegisterPressure,
+                   "estimate-register-pressure",
+                   "Move cmpx earlier only when estimated VGPR pressure in "
+                   "the header exceeds the target")));
 
 namespace {
 
@@ -95,7 +127,7 @@ private:
   const SIInstrInfo *TII = nullptr;
   LiveVariables *LV = nullptr;
   MachineDominatorTree *MDT = nullptr;
-  const MachineLoopInfo *Loops = nullptr;
+  MachineLoopInfo *Loops = nullptr;
   MachineRegisterInfo *MRI = nullptr;
 
 public:
@@ -142,6 +174,17 @@ public:
       Register Reg, MachineBasicBlock *LoopHeader,
       SmallSetVector<MachineBasicBlock *, 2> &LoopBlocks,
       SmallVectorImpl<MachineInstr *> &Instructions) const;
+
+  using HeaderWithLiveThrough =
+      std::pair<MachineBasicBlock *, SmallVector<Register, 16>>;
+  void collectWaterfallCandidateHeaders(
+      MachineFunction &MF,
+      SmallVectorImpl<HeaderWithLiveThrough> &HeadersToReorder) const;
+  bool optimizeWaterfallCmpxPlacement(MachineBasicBlock *LoopHeader,
+                                      ArrayRef<Register> LiveThrough);
+  void updateLiveVariablesAfterBlockSplit(
+      MachineBasicBlock *CurBB, MachineBasicBlock *NewBB,
+      SmallVectorImpl<Register> &LiveThrough) const;
 };
 
 class SIOptimizeVGPRLiveRangeLegacy : public MachineFunctionPass {
@@ -556,6 +599,296 @@ void SIOptimizeVGPRLiveRange::optimizeLiveRange(
   updateLiveRangeInThenRegion(Reg, If, Flow);
 }
 
+static inline bool isCmpxTermOpcode(unsigned Opc) {
+  switch (Opc) {
+  case AMDGPU::V_CMPX_EQ_U32_nosdst_e32_term:
+  case AMDGPU::V_CMPX_EQ_U32_nosdst_e64_term:
+  case AMDGPU::V_CMPX_EQ_U64_nosdst_e32_term:
+  case AMDGPU::V_CMPX_EQ_U64_nosdst_e64_term:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static inline bool hasKilledVirtRegOperand(const MachineInstr &MI) {
+  for (const MachineOperand &MO : MI.uses()) {
+    if (MO.isReg() && MO.getReg().isVirtual() && MO.isKill())
+      return true;
+  }
+  return false;
+}
+
+static inline bool isOperandExpected(const MachineOperand &MO) {
+  if (MO.isImm() || MO.isFPImm() || MO.isCImm())
+    return true;
+  if (MO.isReg() && MO.getReg().isVirtual())
+    return true;
+  return false;
+}
+
+static inline bool isNonTerminatorExpected(MachineInstr &NT) {
+  switch (NT.getOpcode()) {
+    case TargetOpcode::PHI:
+    case TargetOpcode::REG_SEQUENCE:
+    case AMDGPU::V_READFIRSTLANE_B32:
+      return true;
+    default:
+      return false;
+    }
+}
+
+static inline bool isWaterfallCandidateHeader(MachineBasicBlock *Header) {
+  unsigned NumCmpx = 0;
+  bool CmpxHasKilledOperand = false;
+  for (MachineInstr &MI : *Header) {
+    if (!MI.isTerminator()) {
+      if (!isNonTerminatorExpected(MI))
+        return false;
+    }
+    else {
+      if (!isCmpxTermOpcode(MI.getOpcode()))
+        return false;
+
+      for (const MachineOperand &MO : MI.explicit_uses()) {
+        if (!isOperandExpected(MO))
+          return false;
+      }
+
+      ++NumCmpx;
+      if (!CmpxHasKilledOperand && hasKilledVirtRegOperand(MI))
+        CmpxHasKilledOperand = true;
+    }
+  }
+  return (CmpxHasKilledOperand && NumCmpx >= 2);
+}
+
+// Collect waterfall loop headers that may benefit from reordering and for each
+// selected header return its live-through vreg list.
+void SIOptimizeVGPRLiveRange::collectWaterfallCandidateHeaders(
+    MachineFunction &MF,
+    SmallVectorImpl<HeaderWithLiveThrough> &HeadersToReorder) const {
+  const bool EstimatePressure =
+      WaterfallCmpxPlacementOptimization ==
+      WaterfallCmpxPlacementMode::EstimateRegisterPressure;
+  assert((EstimatePressure || WaterfallCmpxPlacementOptimization ==
+                                  WaterfallCmpxPlacementMode::Always) &&
+         "caller must check that the optimization is enabled");
+
+  // For safety, a candidate header must have the exact shape
+  // produced by previuos passes that insert waterfall loops.
+  //   - non-terminators are only PHI, V_READFIRSTLANE_B32, and REG_SEQUENCE
+  //   - terminators are all cmpx_term
+  // Moving cmpx earlier is possible and would shortens the live range of at least
+  // one virtual register:
+  //   - at least two cmpx terminators
+  //   - at leastone with a killed virtual-register source operand
+  SmallVector<MachineBasicBlock *, 4> CandidateHeaders;
+  for (MachineBasicBlock &MBB : MF) {
+    for (MachineInstr &MI : MBB.terminators()) {
+      if (MI.getOpcode() != AMDGPU::SI_WATERFALL_LOOP)
+        continue;
+      MachineBasicBlock *Header = MI.getOperand(0).getMBB();
+      if (isWaterfallCandidateHeader(Header))
+        CandidateHeaders.push_back(Header);
+    }
+  }
+  if (CandidateHeaders.empty())
+    return;
+
+  SmallVector<SmallVector<Register, 16>, 4> LiveThrough(CandidateHeaders.size());
+  SmallVector<GCNRegPressure, 4> RP;
+  if (EstimatePressure)
+    RP.resize(CandidateHeaders.size());
+
+  // A single pass over all virtual registers
+  // (a) estimates register pressure of the candidate headers
+  // (b) computes the live-through contribution of the candidate headers so that it can be
+  // updated incrementally when cmpx reordering forces block splitting
+  for (unsigned I = 0, E = MRI->getNumVirtRegs(); I != E; ++I) {
+    Register Reg = Register::index2VirtReg(I);
+    if (MRI->def_empty(Reg))
+      continue;
+    LiveVariables::VarInfo &VI = LV->getVarInfo(Reg);
+    for (auto [Idx, Header] : enumerate(CandidateHeaders)) {
+      if (!VI.AliveBlocks.test(Header->getNumber()))
+        continue;
+      LiveThrough[Idx].push_back(Reg);
+      if (EstimatePressure)
+        RP[Idx].inc(Reg, LaneBitmask::getNone(), MRI->getMaxLaneMaskForVReg(Reg), *MRI);
+    }
+  }
+
+  // For each candidate header, check register pressure and if selected for
+  // reordering, append the header to the result along with its live-through
+  // vreg list
+  for (auto [Idx, Header] : enumerate(CandidateHeaders)) {
+    if (EstimatePressure) {
+      // Add per-block contributions from defs inside the header
+      for (MachineInstr &MI : *Header) {
+        for (const MachineOperand &MO : MI.defs()) {
+          if (!MO.isReg() || !MO.getReg().isVirtual())
+            continue;
+          RP[Idx].inc(MO.getReg(), LaneBitmask::getNone(),
+                      MRI->getMaxLaneMaskForVReg(MO.getReg()), *MRI);
+        }
+      }
+      GCNRPTarget Target(MF, RP[Idx]);
+      bool High = !Target.satisfied(RP[Idx]);
+      LLVM_DEBUG(dbgs() << "Register pressure in " << printMBBReference(*Header)
+                        << ": SGPRs=" << RP[Idx].getSGPRNum()
+                        << " VGPRs=" << RP[Idx].getArchVGPRNum()
+                        << (High ? " (high)\n" : " (ok)\n"));
+      if (!High)
+        continue;
+    }
+    HeadersToReorder.emplace_back(Header, std::move(LiveThrough[Idx]));
+  }
+}
+
+bool SIOptimizeVGPRLiveRange::optimizeWaterfallCmpxPlacement(
+    MachineBasicBlock *LoopHeader, ArrayRef<Register> LiveThroughIn) {
+  MachineFunction &MF = *LoopHeader->getParent();
+  SmallVector<MachineInstr *, 4> Candidates;
+  for (MachineInstr &MI : LoopHeader->terminators()) {
+    assert(isCmpxTermOpcode(MI.getOpcode()) &&
+           "waterfall header should only have cmpx_term terminators");
+    Candidates.push_back(&MI);
+  }
+
+  LLVM_DEBUG(dbgs() << "Moving " << Candidates.size()
+                    << " cmpx_term instructions in "
+                    << printMBBReference(*LoopHeader) << '\n');
+
+  // Mutable copy of the live-through set; we maintain it incrementally
+  // across splits, dropping any reg defined or killed inside the lower half.
+  SmallVector<Register, 16> LiveThrough(LiveThroughIn.begin(),
+                                        LiveThroughIn.end());
+
+  // For each candidate, find the last instruction that defines any of its
+  // source operands, and move the cmpx to immediately after it. Block
+  // splitting is required because cmpx_term writes EXEC.
+  MachineBasicBlock *CurBB = LoopHeader;
+
+  for (MachineInstr *Cmpx : Candidates) {
+
+    // Find the last def of any source operand in the non-terminator region.
+    MachineBasicBlock::iterator InsertPt;
+    bool Found = false;
+    for (auto It = CurBB->getFirstTerminator(); It != CurBB->begin();) {
+      --It;
+      if (It->isPHI())
+        break;
+      for (const MachineOperand &MO : Cmpx->uses()) {
+        if (!MO.isReg() || !MO.getReg().isVirtual())
+          continue;
+        if (It->definesRegister(MO.getReg(), TRI)) {
+          InsertPt = std::next(It);
+          Found = true;
+          break;
+        }
+      }
+      if (Found)
+        break;
+    }
+
+    if (!Found)
+      continue;
+
+    CurBB->splice(InsertPt, CurBB, Cmpx);
+    LLVM_DEBUG(dbgs() << "  Moved: " << Cmpx);
+
+    // Split the block after the cmpx_term.
+    MachineBasicBlock *NewBB = MF.CreateMachineBasicBlock();
+    MF.insert(std::next(CurBB->getIterator()), NewBB);
+
+    NewBB->splice(NewBB->end(), CurBB, InsertPt, CurBB->end());
+    NewBB->transferSuccessorsAndUpdatePHIs(CurBB);
+    CurBB->addSuccessor(NewBB);
+
+    if (MDT) {
+      MDT->addNewBlock(NewBB, CurBB);
+      for (MachineBasicBlock *Succ : NewBB->successors()) {
+        if (MDT->dominates(CurBB, Succ))
+          MDT->changeImmediateDominator(Succ, NewBB);
+      }
+    }
+
+    if (Loops) {
+      if (MachineLoop *L = Loops->getLoopFor(CurBB))
+        L->addBasicBlockToLoop(NewBB, *Loops);
+    }
+
+    updateLiveVariablesAfterBlockSplit(CurBB, NewBB, LiveThrough);
+
+    CurBB = NewBB;
+  }
+
+  return true;
+}
+
+// Update LiveVariables after splitting CurBB into (updated CurBB, NewBB) by
+// moving its lower half into NewBB. The split changes liveness in two ways:
+//
+//   Case A: regs live-through original CurBB. After the split, they are still
+//   live-in to the updated CurBB (already in AliveBlocks). If not touched in
+//   NewBB, they are also live-through NewBB and need AliveBlocks[NewBB]; if
+//   killed in NewBB, they are no longer live-through (LV's Kills MI pointers
+//   stay valid across reparenting).
+//
+//   Case B: regs killed in original CurBB without a local def. The kill MI
+//   may have moved into NewBB; the reg is then live-in to updated CurBB and
+//   passes through to NewBB, so AliveBlocks[updated CurBB] must be set.
+//
+// LiveThrough is the per-header live-through set; defs and kills inside NewBB
+// are dropped from it so the next split iteration sees the right set.
+void SIOptimizeVGPRLiveRange::updateLiveVariablesAfterBlockSplit(
+    MachineBasicBlock *CurBB, MachineBasicBlock *NewBB,
+    SmallVectorImpl<Register> &LiveThrough) const {
+  SmallDenseSet<Register, 8> DefsInNewBB;
+  SmallDenseSet<Register, 8> KillsInNewBB;
+  for (MachineInstr &MI : *NewBB) {
+    for (const MachineOperand &MO : MI.operands()) {
+      if (!MO.isReg() || !MO.getReg().isVirtual())
+        continue;
+      if (MO.isDef())
+        DefsInNewBB.insert(MO.getReg());
+      else if (MO.isKill())
+        KillsInNewBB.insert(MO.getReg());
+    }
+  }
+  SmallDenseSet<Register, 8> DefsInCurBB;
+  for (MachineInstr &MI : *CurBB) {
+    for (const MachineOperand &MO : MI.defs()) {
+      if (MO.isReg() && MO.getReg().isVirtual())
+        DefsInCurBB.insert(MO.getReg());
+    }
+  }
+
+  unsigned NewNum = NewBB->getNumber();
+  unsigned CurNum = CurBB->getNumber();
+
+  // Case A: drop defs and kills from LiveThrough; propagate the rest.
+  auto *NewEnd = std::remove_if(
+      LiveThrough.begin(), LiveThrough.end(), [&](Register R) {
+        if (DefsInNewBB.contains(R))
+          return true;
+        if (KillsInNewBB.contains(R))
+          return true;
+        LV->getVarInfo(R).AliveBlocks.set(NewNum);
+        return false;
+      });
+  LiveThrough.erase(NewEnd, LiveThrough.end());
+
+  // Case B: any reg killed in NewBB whose def is in neither updated CurBB nor
+  // NewBB must be live-in to updated CurBB as a pass-through.
+  for (Register R : KillsInNewBB) {
+    if (DefsInNewBB.contains(R) || DefsInCurBB.contains(R))
+      continue;
+    LV->getVarInfo(R).AliveBlocks.set(CurNum);
+  }
+}
+
 void SIOptimizeVGPRLiveRange::optimizeWaterfallLiveRange(
     Register Reg, MachineBasicBlock *LoopHeader,
     SmallSetVector<MachineBasicBlock *, 2> &Blocks,
@@ -664,7 +997,6 @@ SIOptimizeVGPRLiveRangePass::run(MachineFunction &MF,
   PA.preserve<LiveVariablesAnalysis>();
   PA.preserve<DominatorTreeAnalysis>();
   PA.preserve<MachineLoopAnalysis>();
-  PA.preserveSet<CFGAnalyses>();
   return PA;
 }
 
@@ -728,6 +1060,19 @@ bool SIOptimizeVGPRLiveRange::run(MachineFunction &MF) {
           optimizeWaterfallLiveRange(Reg, LoopHeader, Blocks, Instructions);
       }
     }
+  }
+
+  // Optimize placement of v_cmpx instructions inside waterfall loop
+  // headers. By default, v_cmpx are deferred to the end of the header to
+  // hide latency of v_readfirstlane instructions they depend on.
+  // To reduce register pressure, this pass can move v_cmpx instruction earlier and
+  // place it immediately before the last definition of its source operands.
+  if (WaterfallCmpxPlacementOptimization != WaterfallCmpxPlacementMode::Never) {
+    // Incrementally updates LiveVariables
+    SmallVector<HeaderWithLiveThrough, 4> HeadersToReorder;
+    collectWaterfallCandidateHeaders(MF, HeadersToReorder);
+    for (auto &[Header, LiveThrough] : HeadersToReorder)
+      MadeChange |= optimizeWaterfallCmpxPlacement(Header, LiveThrough);
   }
 
   return MadeChange;
