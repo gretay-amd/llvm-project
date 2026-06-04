@@ -2131,8 +2131,9 @@ bool AMDGPUCodeGenPrepareImpl::visitWaterfallLastUseIntrinsic(
   auto *Token = I.getOperand(0);
   for (auto *U : I.users()) {
     auto *UI = cast<Instruction>(U);
-    BasicBlock::iterator InsertPt = std::next(UI->getIterator());
-    IRBuilder<> Builder(I.getParent(), InsertPt);
+    assert(UI->getParent() == I.getParent() &&
+           "waterfall.last.use user must be in the same block");
+    IRBuilder<> Builder(UI->getNextNode());
     Builder.CreateIntrinsic(Intrinsic::amdgcn_waterfall_loop_end, {}, {Token});
   }
   return true;

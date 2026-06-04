@@ -2760,11 +2760,10 @@ def int_amdgcn_waterfall_end :
                LLVMMatchType<0>], // Same as return value
               [IntrConvergent]>;
 
-// Effectively a no-op, no code results directly from this intrinsic. This is
-// used to indicate that the use of the defined value constitutes the end of the
-// waterfall propagation. This is roughly equivalent to the end intrinsic, but
-// can be used to tag values that are used in non-defining operations such as a
-// store.
+// The waterfall.last.use intrinsic indicates that the use of the defined value
+// constitutes the end of the waterfall region.
+// This is roughly equivalent to the end intrinsic, but can be used to tag values
+// that are used in non-defining operations such as a store.
 def int_amdgcn_waterfall_last_use :
     Intrinsic<[llvm_any_ty],      // Returns any value
               [llvm_token_ty,     // Token from begin
@@ -2778,7 +2777,7 @@ def int_amdgcn_waterfall_last_use_vgpr :
                LLVMMatchType<0>], // Same as return value
               []>;
 
-// Special waterfall loop end intrinsic to be used with last.use
+// Special waterfall.loop.end intrinsic to be used with last.use
 // This is inserted late, before codegen, mainly to mark the loop end
 // for special handling such as scc clobbers.
 def int_amdgcn_waterfall_loop_end :

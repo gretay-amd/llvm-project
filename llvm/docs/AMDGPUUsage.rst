@@ -2060,7 +2060,7 @@ non-uniform operands that need to be made uniform, and the values
 to use as the "index" of the loop.
 
 A waterfall group must contain at least one
-``waterfall.begin``, at least one of ``waterfall.readfirstlane``, and at least one
+``waterfall.begin``, at least one ``waterfall.readfirstlane``, and at least one
 of ``waterfall.end`` or ``waterfall.last.use`` intrinsic.
 A group can contain more than one of each of the waterfall intrinsics.
 The token on the final
@@ -2115,8 +2115,8 @@ If all parts of the index are uniform, the compiler will not insert the waterfal
                                                    waterfall group.
 
                                                    The intrinsic returns a new token that must be threaded through the
-                                                   corresponding ``waterfall.readfirstlane``, ``waterfall.end`` or
-                                                   ``waterfall.last.use`` intrinsics.
+                                                   corresponding ``waterfall.readfirstlane`` and ``waterfall.end``
+                                                   or ``waterfall.last.use`` intrinsics.
 
   ``llvm.amdgcn.waterfall.readfirstlane``          Reads the first active lane's value of a given non-uniform operand and
                                                    returns it as a uniform value for use within a waterfall region.
@@ -2138,6 +2138,7 @@ If all parts of the index are uniform, the compiler will not insert the waterfal
   ``llvm.amdgcn.waterfall.last.use``               Variant of ``waterfall.end`` for values whose last use is in a
                                                    non-defining operation such as a store. Marks that the use of the value
                                                    constitutes the end of the waterfall region.
+                                                   Effectively a no-op, no code results directly from this intrinsic.
 
   ``llvm.amdgcn.waterfall.last.use.vgpr``          Variant of ``waterfall.last.use`` for values that remain in a VGPR.
 
