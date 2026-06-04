@@ -453,6 +453,11 @@ def WaterfallPseudoTable : GenericTable {
   let PrimaryKeyName = "getWaterfallPseudoOpcodeHelper";
 }
 
+def getWaterfallPseudoInfoByOpcode : SearchIndex {
+  let Table = WaterfallPseudoTable;
+  let Key = ["Opcode"];
+}
+
 def : WaterfallPseudoInfo<int_amdgcn_waterfall_begin, 1, SI_WATERFALL_BEGIN_V1>;
 def : WaterfallPseudoInfo<int_amdgcn_waterfall_begin, 2, SI_WATERFALL_BEGIN_V2>;
 def : WaterfallPseudoInfo<int_amdgcn_waterfall_begin, 4, SI_WATERFALL_BEGIN_V4>;

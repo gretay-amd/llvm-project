@@ -318,6 +318,10 @@ unsigned getWaterfallPseudoOpcode(unsigned IntrID, unsigned SizeDwords) {
   return 0;
 }
 
+const WaterfallPseudoInfo *getWaterfallPseudoInfo(unsigned Opcode) {
+  return getWaterfallPseudoInfoByOpcode(Opcode);
+}
+
 int getMIMGOpcode(unsigned BaseOpcode, unsigned MIMGEncoding,
                   unsigned VDataDwords, unsigned VAddrDwords) {
   const MIMGInfo *Info =

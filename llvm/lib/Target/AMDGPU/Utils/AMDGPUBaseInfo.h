@@ -1930,6 +1930,9 @@ private:
 LLVM_READONLY
 unsigned getWaterfallPseudoOpcode(unsigned IntrID, unsigned SizeDwords);
 
+LLVM_READONLY
+const WaterfallPseudoInfo *getWaterfallPseudoInfo(unsigned Opcode);
+
 } // namespace AMDGPU
 
 raw_ostream &operator<<(raw_ostream &OS,

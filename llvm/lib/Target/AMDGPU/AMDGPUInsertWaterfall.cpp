@@ -18,7 +18,10 @@
 #include "GCNSubtarget.h"
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "SIInstrInfo.h"
+#include "Utils/AMDGPUBaseInfo.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsAMDGPU.h"
 
 using namespace llvm;
 
@@ -26,93 +29,35 @@ using namespace llvm;
 
 namespace {
 
-static unsigned getWFBeginSize(const unsigned Opcode) {
-  switch (Opcode) {
-  case AMDGPU::SI_WATERFALL_BEGIN_V1:
-    return 1;
-  case AMDGPU::SI_WATERFALL_BEGIN_V2:
-    return 2;
-  case AMDGPU::SI_WATERFALL_BEGIN_V4:
-    return 4;
-  case AMDGPU::SI_WATERFALL_BEGIN_V8:
-    return 8;
-  default:
-    break;
-  }
-
-  return 0; // Not SI_WATERFALL_BEGIN_*
+static unsigned getWFIntrID(unsigned Opcode) {
+  const AMDGPU::WaterfallPseudoInfo *Info =
+      AMDGPU::getWaterfallPseudoInfo(Opcode);
+  return Info ? Info->Intr : 0;
 }
 
-static unsigned getWFRFLSize(const unsigned Opcode) {
-  switch (Opcode) {
-  case AMDGPU::SI_WATERFALL_READFIRSTLANE_V1:
-    return 1;
-  case AMDGPU::SI_WATERFALL_READFIRSTLANE_V2:
-    return 2;
-  case AMDGPU::SI_WATERFALL_READFIRSTLANE_V4:
-    return 4;
-  case AMDGPU::SI_WATERFALL_READFIRSTLANE_V8:
-    return 8;
-  default:
-    break;
-  }
-
-  return 0; // Not SI_WATERFALL_READFIRSTLANE_*
+static bool isWFBegin(unsigned Opcode) {
+  return getWFIntrID(Opcode) == Intrinsic::amdgcn_waterfall_begin;
 }
 
-static unsigned getWFEndSize(const unsigned Opcode) {
-  switch (Opcode) {
-  case AMDGPU::SI_WATERFALL_END_V1:
-    return 1;
-  case AMDGPU::SI_WATERFALL_END_V2:
-    return 2;
-  case AMDGPU::SI_WATERFALL_END_V4:
-    return 4;
-  case AMDGPU::SI_WATERFALL_END_V8:
-    return 8;
-  default:
-    break;
-  }
-
-  return 0; // Not SI_WATERFALL_END_*
+static bool isWFRFL(unsigned Opcode) {
+  return getWFIntrID(Opcode) == Intrinsic::amdgcn_waterfall_readfirstlane;
 }
 
-static unsigned getWFLastUseSize(const unsigned Opcode) {
-  switch (Opcode) {
-  case AMDGPU::SI_WATERFALL_LAST_USE_V1:
-  case AMDGPU::SI_WATERFALL_LAST_USE_V1_V:
-    return 1;
-  case AMDGPU::SI_WATERFALL_LAST_USE_V2:
-  case AMDGPU::SI_WATERFALL_LAST_USE_V2_V:
-    return 2;
-  case AMDGPU::SI_WATERFALL_LAST_USE_V4:
-  case AMDGPU::SI_WATERFALL_LAST_USE_V4_V:
-    return 4;
-  case AMDGPU::SI_WATERFALL_LAST_USE_V8:
-  case AMDGPU::SI_WATERFALL_LAST_USE_V8_V:
-    return 8;
-  default:
-    break;
-  }
-
-  return 0; // Not SI_WATERFALL_LAST_USE_*
+static bool isWFEnd(unsigned Opcode) {
+  return getWFIntrID(Opcode) == Intrinsic::amdgcn_waterfall_end;
 }
 
-static bool isWFLastUseVGPR(const unsigned Opcode) {
-  switch (Opcode) {
-  case AMDGPU::SI_WATERFALL_LAST_USE_V1_V:
-  case AMDGPU::SI_WATERFALL_LAST_USE_V2_V:
-  case AMDGPU::SI_WATERFALL_LAST_USE_V4_V:
-  case AMDGPU::SI_WATERFALL_LAST_USE_V8_V:
-    return true;
-  default:
-    break;
-  }
-
-  return false;
+static bool isWFLastUse(unsigned Opcode) {
+  unsigned IntrID = getWFIntrID(Opcode);
+  return IntrID == Intrinsic::amdgcn_waterfall_last_use ||
+         IntrID == Intrinsic::amdgcn_waterfall_last_use_vgpr;
 }
 
-static bool isWFLoopEnd(const unsigned Opcode) {
+static bool isWFLastUseVGPR(unsigned Opcode) {
+  return getWFIntrID(Opcode) == Intrinsic::amdgcn_waterfall_last_use_vgpr;
+}
+
+static bool isWFLoopEnd(unsigned Opcode) {
   return Opcode == AMDGPU::SI_WATERFALL_LOOP_END;
 }
 
@@ -314,9 +259,8 @@ private:
     void processCandidate(MachineInstr *Cand) {
       unsigned Opcode = Cand->getOpcode();
       // Trivially end any waterfall intrinsic instructions
-      if (getWFBeginSize(Opcode) || getWFRFLSize(Opcode) ||
-          getWFEndSize(Opcode) || getWFLastUseSize(Opcode) ||
-          isWFLoopEnd(Opcode)) {
+      if (isWFBegin(Opcode) || isWFRFL(Opcode) || isWFEnd(Opcode) ||
+          isWFLastUse(Opcode) || isWFLoopEnd(Opcode)) {
         // TODO: A new waterfall clause shouldn't overlap with any uses
         // tagged by a last_use intrinsic
         return;
@@ -362,9 +306,8 @@ private:
     bool addCandidate(MachineInstr *Cand) {
       unsigned Opcode = Cand->getOpcode();
 
-      assert((getWFBeginSize(Opcode) || getWFRFLSize(Opcode) ||
-              getWFEndSize(Opcode) || getWFLastUseSize(Opcode) ||
-              isWFLoopEnd(Opcode)) &&
+      assert((isWFBegin(Opcode) || isWFRFL(Opcode) || isWFEnd(Opcode) ||
+              isWFLastUse(Opcode) || isWFLoopEnd(Opcode)) &&
              "expected a waterfall instruction in addCandidate");
 
       auto CandTokMO = TII->getNamedOperand(*Cand, AMDGPU::OpName::tok);
@@ -380,7 +323,7 @@ private:
       if (TokReg == AMDGPU::NoRegister) {
         // All begins have been removed - continue to process the rest of the
         // grouping ready for them to be removed in the next stage
-        assert(!getWFBeginSize(Opcode) &&
+        assert(!isWFBegin(Opcode) &&
                "unexpected begin instruction for addCandidate");
         assert(tokIsStart(CandTokMO) &&
                "waterfall group with no begin doesn't have undef tok input");
@@ -388,21 +331,21 @@ private:
         TokReg = CandTokMO->getReg();
       }
       if (CandTokMO->getReg() == TokReg) {
-        if (getWFBeginSize(Opcode)) {
+        if (isWFBegin(Opcode)) {
           auto TokRetMO = TII->getNamedOperand(*Cand, AMDGPU::OpName::tok_ret);
           assert(TokRetMO && "Unable to extract tok_ret operand from "
                              "SI_WATERFALL_BEGIN pseudo op");
           BeginList.push_back(Cand);
           TokReg = TokRetMO->getReg();
           return true;
-        } else if (getWFRFLSize(Opcode)) {
+        } else if (isWFRFL(Opcode)) {
           RFLList.push_back(Cand);
           return true;
-        } else if (getWFEndSize(Opcode)) {
+        } else if (isWFEnd(Opcode)) {
           EndList.push_back(Cand);
           Final = Cand;
           return true;
-        } else if (getWFLastUseSize(Opcode)) {
+        } else if (isWFLastUse(Opcode)) {
           LastUseList.push_back(Cand);
           if (isWFLastUseVGPR(Opcode))
             hasVGPRLastUse = true;
@@ -858,7 +801,7 @@ bool AMDGPUInsertWaterfall::runOnMachineFunction(MachineFunction &MF) {
     for (MachineInstr &MI : MBB) {
       unsigned Opcode = MI.getOpcode();
 
-      if (getWFBeginSize(Opcode)) {
+      if (isWFBegin(Opcode)) {
         if (StartNew) {
           Worklist.push_back(WaterfallWorkitem(&MI, TII, MRI));
           StartNew = false;
@@ -867,8 +810,8 @@ bool AMDGPUInsertWaterfall::runOnMachineFunction(MachineFunction &MF) {
             llvm_unreachable("Incorrect SI_WATERFALL_* groups");
           }
         }
-      } else if (getWFRFLSize(Opcode) || getWFEndSize(Opcode) ||
-                 getWFLastUseSize(Opcode) || isWFLoopEnd(Opcode)) {
+      } else if (isWFRFL(Opcode) || isWFEnd(Opcode) || isWFLastUse(Opcode) ||
+                 isWFLoopEnd(Opcode)) {
         // On to the body of the group intrinsics,
 
         // Tag StartNew as true if we encounter another begin
