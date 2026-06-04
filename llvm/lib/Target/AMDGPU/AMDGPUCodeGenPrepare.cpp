@@ -264,6 +264,7 @@ public:
   bool visitAddrSpaceCastInst(AddrSpaceCastInst &I);
 
   bool visitIntrinsicInst(IntrinsicInst &I);
+  bool visitWaterfallLastUseIntrinsic(IntrinsicInst &I);
   bool visitFMinLike(IntrinsicInst &I);
   bool visitSqrt(IntrinsicInst &I);
   bool visitLog(FPMathOperator &Log, Intrinsic::ID IID);
@@ -2089,6 +2090,8 @@ bool AMDGPUCodeGenPrepareImpl::visitIntrinsicInst(IntrinsicInst &I) {
   case Intrinsic::amdgcn_waterfall_end:
     CurrentWaterfall = &I;
     return false;
+  case Intrinsic::amdgcn_waterfall_last_use:
+    return visitWaterfallLastUseIntrinsic(I);
   default:
     return false;
   }
@@ -2120,6 +2123,19 @@ bool AMDGPUCodeGenPrepareImpl::visitGetElementPtrInst(GetElementPtrInst &I) {
     CurrentLoop = CurrentLoop->getParentLoop();
   }
 
+  return true;
+}
+
+bool AMDGPUCodeGenPrepareImpl::visitWaterfallLastUseIntrinsic(
+    IntrinsicInst &I) {
+  auto *Token = I.getOperand(0);
+  for (auto *U : I.users()) {
+    auto *UI = cast<Instruction>(U);
+    assert(UI->getParent() == I.getParent() &&
+           "waterfall.last.use user must be in the same block");
+    IRBuilder<> Builder(UI->getNextNode());
+    Builder.CreateIntrinsic(Intrinsic::amdgcn_waterfall_loop_end, {}, {Token});
+  }
   return true;
 }
 
